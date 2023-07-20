@@ -28,5 +28,7 @@ To run a Chip-8 program, you will need a Chip-8 ROM. Once you have a ROM, you ca
 ./target/release/chip8 <path-to-rom>
 ```
 
+![Screenshot 2023-07-21 005359](https://github.com/GKaszewski/chip8/assets/42281413/9767cc67-808b-4262-80b1-9719fe4812e8)
+
 ## Notes
 Even though it passes cortexm0's test suite, this emulator is not perfect and does not pass flags test :/ (no idea why tho). There are still some bugs that need to be fixed. If you find any bugs, please open an issue.

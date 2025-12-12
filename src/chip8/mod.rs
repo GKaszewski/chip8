@@ -1,19 +1,29 @@
 use rand::Rng;
-use raylib::prelude::*;
 
-pub struct Chip8 {
-    pub memory: [u8; 4096], // 4K memory
-    pub v: [u8; 16], // 16 8-bit registers
-    pub pc: u16, // program counter
-    pub i: u16, // index register
-    pub stack: [u16; 16], // stack
-    pub timer_delay: u8, // delay timer
-    pub timer_sound: u8, // sound timer
-    pub display: [u8; 64 * 32], // display
-    pub fontset: [u8; 80], // fontset
-    pub keypad: [u8; 16], // keypad
+#[derive(Clone, Copy, Debug)]
+pub struct Quirks {
+    pub shift_vy: bool, // If true, 8xy6/8xyE set Vx = Vy shift. If false, Vx = Vx shift.
 }
 
+impl Default for Quirks {
+    fn default() -> Self {
+        Self { shift_vy: false }
+    }
+}
+
+pub struct Chip8 {
+    memory: [u8; 4096],     // 4K memory
+    v: [u8; 16],            // 16 8-bit registers
+    pc: u16,                // program counter
+    i: u16,                 // index register
+    stack: [u16; 16],       // stack
+    sp: usize,              // stack pointer
+    timer_delay: u8,        // delay timer
+    timer_sound: u8,        // sound timer
+    display: [u8; 64 * 32], // display
+    fontset: [u8; 80],      // fontset
+    quirks: Quirks,         // Configurable quirks
+}
 
 const FONT_SET: [u8; 80] = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
@@ -31,353 +41,490 @@ const FONT_SET: [u8; 80] = [
     0xF0, 0x80, 0x80, 0x80, 0xF0, // C
     0xE0, 0x90, 0x90, 0x90, 0xE0, // D
     0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
-    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+    0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
-pub fn initialize () -> Chip8 {
-    let mut chip8 = Chip8 {
-        memory: [0; 4096],
-        v: [0; 16],
-        pc: 0x200,
-        i: 0,
-        stack: [0; 16],
-        timer_delay: 0,
-        timer_sound: 0,
-        display: [0; 64 * 32],
-        fontset: FONT_SET,
-        keypad: [0; 16],
-    };
+impl Chip8 {
+    pub fn new(quirks: Quirks) -> Self {
+        let mut chip8 = Chip8 {
+            memory: [0; 4096],
+            v: [0; 16],
+            pc: 0x200,
+            i: 0,
+            stack: [0; 16],
+            sp: 0,
+            timer_delay: 0,
+            timer_sound: 0,
+            display: [0; 64 * 32],
+            fontset: FONT_SET,
+            quirks,
+        };
 
-    initialize_memory(&mut chip8);
+        chip8.initialize_memory();
 
-    return chip8;
-}
-
-pub fn initialize_memory (chip8: &mut Chip8) {
-    // Load fontset into memory
-    for i in 0..80 {
-        chip8.memory[i] = chip8.fontset[i];
+        chip8
     }
 
-    for i in 81..4096 {
-        chip8.memory[i] = 0;
+    fn initialize_memory(&mut self) {
+        // Load fontset into memory
+        for i in 0..80 {
+            self.memory[i] = self.fontset[i];
+        }
     }
-}
 
-pub fn fetch_opcode(chip8: &mut Chip8) -> u16 {
-    let opcode = (chip8.memory[chip8.pc as usize] as u16) << 8 | (chip8.memory[(chip8.pc + 1) as usize] as u16);
-    chip8.pc += 2;
-    return opcode;
-}
+    pub fn load_rom(&mut self, data: &[u8]) {
+        for (i, &byte) in data.iter().enumerate() {
+            if i + 0x200 < self.memory.len() {
+                self.memory[i + 0x200] = byte;
+            }
+        }
+    }
 
-pub fn execute_opcode(opcode: u16, chip8: &mut Chip8) {
-    let first_nibble = ((opcode & 0xF000) >> 12) as u8;
-    let second_nibble = ((opcode & 0x0F00) >> 8) as u8;
-    let third_nibble = ((opcode & 0x00F0) >> 4) as u8;
-    let fourth_nibble = (opcode & 0x000F) as u8;
-    let nnn = opcode & 0x0FFF;
-    let kk = (opcode & 0x00FF) as u8;
+    pub fn get_display(&self) -> &[u8] {
+        &self.display
+    }
 
-    match first_nibble  {
-        0 => {
-            if second_nibble == 0 {
-                if fourth_nibble == 0xE {
-                    // 00EE - return from subroutine
-                    chip8.pc = chip8.stack[chip8.stack.len() - 1];
-                } else {
-                    // clear screen
-                    for i in 0..chip8.display.len() {
-                        chip8.display[i] = 0;
-                    }
-                } 
-            }
-        },
-        1 => {
-            // 1nnn - jump to address nnn
-            chip8.pc = nnn;
-        },
-        2 => {
-            // 2nnn - call subroutine at nnn
-            chip8.stack[chip8.stack.len() - 1] = chip8.pc;
-            chip8.pc = nnn;
-        },
-        3 => {
-            // 3xkk - skip next instruction if Vx = kk
-            if chip8.v[second_nibble as usize] == kk {
-                chip8.pc += 2;
-            }
-        },
-        4 => {
-            // 4xkk - skip next instruction if Vx != kk
-            if chip8.v[second_nibble as usize] != kk {
-                chip8.pc += 2;
-            }
-        },
-        5 => {
-            // 5xy0 - skip next instruction if Vx = Vy
-            if chip8.v[second_nibble as usize] == chip8.v[third_nibble as usize] {
-                chip8.pc += 2;
-            }
-        },
-        6 => {
-            // 6xkk - set Vx = kk
-            chip8.v[second_nibble as usize] = kk;
-        },
-        7 => {
-            // 7xkk - set Vx = Vx + kk
-            let vx = chip8.v[second_nibble as usize] as u16;
-            let val = kk as u16;
-            let sum = vx + val;
-            chip8.v[second_nibble as usize] = sum as u8;
+    pub fn get_v(&self) -> &[u8] {
+        &self.v
+    }
 
-        },
-        8 => {
-            match fourth_nibble {
-                0 => {
-                    // 8xy0 - set Vx = Vy
-                    chip8.v[second_nibble as usize] = chip8.v[third_nibble as usize];
-                },
-                1 => {
-                    // 8xy1 - set Vx = Vx OR Vy
-                    chip8.v[second_nibble as usize] |= chip8.v[third_nibble as usize];
-                },
-                2 => {
-                    // 8xy2 - set Vx = Vx AND Vy
-                    chip8.v[second_nibble as usize] &= chip8.v[third_nibble as usize];
-                },
-                3 => {
-                    // 8xy3 - set Vx = Vx XOR Vy
-                    chip8.v[second_nibble as usize] ^= chip8.v[third_nibble as usize];
-                },
-                4 => {
-                    // 8xy4 - set Vx = Vx + Vy, set VF = carry
-                    let vx = chip8.v[second_nibble as usize] as u16;
-                    let vy = chip8.v[third_nibble as usize] as u16;
-                    let result = vx + vy;
-                    chip8.v[0x0F] = if result > 255 { 1 } else { 0 };
-                    chip8.v[second_nibble as usize] = result as u8;
-                },
-                5 => {
-                    // 8xy5 - set Vx = Vx - Vy, set VF = NOT borrow
-                    chip8.v[second_nibble as usize] = chip8.v[second_nibble as usize].wrapping_sub(chip8.v[third_nibble as usize]);
-                    chip8.v[0x0F] = if chip8.v[second_nibble as usize] > chip8.v[third_nibble as usize] { 1 } else { 0 };
-                },
-                6 => {
-                    // 8xy6 - set Vx = Vx SHR 1
-                    chip8.v[0x0F] = chip8.v[second_nibble as usize] & 1;
-                    chip8.v[second_nibble as usize] >>= 1;
-                },
-                7 => {
-                    // 8xy7 - set Vx = Vy - Vx, set VF = NOT borrow
-                    chip8.v[0x0F] = if chip8.v[third_nibble as usize] > chip8.v[second_nibble as usize] { 1 } else { 0 };
-                    chip8.v[second_nibble as usize] = chip8.v[third_nibble as usize].wrapping_sub(chip8.v[second_nibble as usize]);
-                },
-                0xE => {
-                    // 8xyE - set Vx = Vx SHL 1
-                    chip8.v[0x0F] = (chip8.v[second_nibble as usize] & 0b10000000) >> 7;
-                    chip8.v[second_nibble as usize] <<= 1;
-                },
-                _ => println!("Unknown opcode: {:X}", opcode),
-            }
-        },
-        9 => {
-            // 9xy0 - skip next instruction if Vx != Vy
-            if chip8.v[second_nibble as usize] != chip8.v[third_nibble as usize] {
-                chip8.pc += 2;
-            }
-        },
-        0xA => {
-            // Annn - set I = nnn
-            chip8.i = nnn;
-        },
-        0xB => {
-            // Bnnn - jump to location nnn + V0
-            chip8.pc = nnn + chip8.v[0] as u16;
-        },
-        0xC => {
-            // Cxkk - set Vx = random byte AND kk
-            let mut rng = rand::thread_rng();
-            let random: u8 = rng.gen_range(0..255);
-            chip8.v[second_nibble as usize] = random & kk;
-        },
-        0xD => {
-            // Dxyn - display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision
-            let x = chip8.v[second_nibble as usize] as usize;
-            let y = chip8.v[third_nibble as usize] as usize;
-            let height = fourth_nibble as usize;
-            let mut collision: u8 = 0;
-            for yline in 0..height {
-                let pixel = chip8.memory[chip8.i as usize + yline];
-                for xline in 0..8 {
-                    if (pixel & (0x80 >> xline)) != 0 {
-                        let index = (x + xline + ((y + yline) * 64)) as usize;
-                        // check for out of bounds
-                        if index < chip8.display.len() {
-                            if chip8.display[index] == 1 {
-                                collision = 1;
-                            }
-                            chip8.display[index] ^= 1;
-                        } else {
-                            println!("Out of bounds: {}", index);
+    #[cfg(test)]
+    pub fn get_pc(&self) -> u16 {
+        self.pc
+    }
+
+    #[cfg(test)]
+    pub fn get_sp(&self) -> usize {
+        self.sp
+    }
+
+    #[cfg(test)]
+    pub fn get_stack(&self) -> &[u16] {
+        &self.stack
+    }
+
+    #[cfg(test)]
+    pub fn set_v(&mut self, index: usize, value: u8) {
+        self.v[index] = value;
+    }
+
+    #[cfg(test)]
+    pub fn get_v_at(&self, index: usize) -> u8 {
+        self.v[index]
+    }
+
+    pub fn get_timer_sound(&self) -> u8 {
+        self.timer_sound
+    }
+
+    pub fn tick(&mut self, keypad: [u8; 16]) {
+        let opcode = self.fetch_opcode();
+        self.execute_opcode(opcode, keypad);
+    }
+
+    pub fn update_timers(&mut self) {
+        if self.timer_delay > 0 {
+            self.timer_delay -= 1;
+        }
+
+        if self.timer_sound > 0 {
+            self.timer_sound -= 1;
+        }
+    }
+
+    fn fetch_opcode(&mut self) -> u16 {
+        let opcode = (self.memory[self.pc as usize] as u16) << 8
+            | (self.memory[(self.pc + 1) as usize] as u16);
+        self.pc += 2;
+        opcode
+    }
+
+    fn execute_opcode(&mut self, opcode: u16, keypad: [u8; 16]) {
+        let first_nibble = ((opcode & 0xF000) >> 12) as u8;
+        let second_nibble = ((opcode & 0x0F00) >> 8) as u8;
+        let third_nibble = ((opcode & 0x00F0) >> 4) as u8;
+        let fourth_nibble = (opcode & 0x000F) as u8;
+        let nnn = opcode & 0x0FFF;
+        let kk = (opcode & 0x00FF) as u8;
+
+        // Helper indices
+        let x = second_nibble as usize;
+        let y = third_nibble as usize;
+
+        match first_nibble {
+            0 => {
+                if second_nibble == 0 {
+                    if fourth_nibble == 0xE {
+                        // 00EE - return from subroutine
+                        if self.sp > 0 {
+                            self.sp -= 1;
+                            self.pc = self.stack[self.sp];
+                        }
+                    } else {
+                        // clear screen
+                        // For idiomatic Rust, we can use fill(0) if available or just iter mut
+                        for pixel in self.display.iter_mut() {
+                            *pixel = 0;
                         }
                     }
                 }
             }
-
-            chip8.v[0xF] = collision;
-        },
-        0xE => {
-            match kk {
-                0x9E => {
-                    // Ex9E - skip next instruction if key with the value of Vx is pressed
-                    if chip8.keypad[chip8.v[second_nibble as usize] as usize] != 0 {
-                        //println!("Key pressed: {}", chip8.keypad[chip8.v[second_nibble as usize] as usize]);
-                        chip8.pc += 2;
-                    }
-                },
-                0xA1 => {
-                    // ExA1 - skip next instruction if key with the value of Vx is not pressed
-                    if chip8.keypad[chip8.v[second_nibble as usize] as usize] == 0 {
-                        //println!("Key not pressed: {}", chip8.keypad[chip8.v[second_nibble as usize] as usize]);
-                        chip8.pc += 2;
-                    }
-                },
-                _ => println!("Unknown opcode: {:X}", opcode),
+            1 => {
+                // 1nnn - jump to address nnn
+                self.pc = nnn;
             }
-        },
-        0xF => {
-            match kk {
-                0x07 => {
-                    // Fx07 - set Vx = delay timer value
-                    chip8.v[second_nibble as usize] = chip8.timer_delay;
-                },
-                0x0A => {
-                    // Fx0A - wait for a key press, store the value of the key in Vx
-                    let mut key_pressed = false;
-                    for i in 0..chip8.keypad.len() {
-                        if chip8.keypad[i] != 0 {
-                            chip8.v[second_nibble as usize] = i as u8;
-                            key_pressed = true;
-                            //println!("Key pressed: {} - {}", i, chip8.keypad[chip8.v[second_nibble as usize] as usize]);
+            2 => {
+                // 2nnn - call subroutine at nnn
+                if self.sp < self.stack.len() {
+                    self.stack[self.sp] = self.pc;
+                    self.sp += 1;
+                    self.pc = nnn;
+                }
+            }
+            3 => {
+                // 3xkk - skip next instruction if Vx = kk
+                if self.v[x] == kk {
+                    self.pc += 2;
+                }
+            }
+            4 => {
+                // 4xkk - skip next instruction if Vx != kk
+                if self.v[x] != kk {
+                    self.pc += 2;
+                }
+            }
+            5 => {
+                // 5xy0 - skip next instruction if Vx = Vy
+                if self.v[x] == self.v[y] {
+                    self.pc += 2;
+                }
+            }
+            6 => {
+                // 6xkk - set Vx = kk
+                self.v[x] = kk;
+            }
+            7 => {
+                // 7xkk - set Vx = Vx + kk
+                let (val, _) = self.v[x].overflowing_add(kk);
+                self.v[x] = val;
+            }
+            8 => {
+                match fourth_nibble {
+                    0 => {
+                        // 8xy0 - set Vx = Vy
+                        self.v[x] = self.v[y];
+                    }
+                    1 => {
+                        // 8xy1 - set Vx = Vx OR Vy
+                        self.v[x] |= self.v[y];
+                    }
+                    2 => {
+                        // 8xy2 - set Vx = Vx AND Vy
+                        self.v[x] &= self.v[y];
+                    }
+                    3 => {
+                        // 8xy3 - set Vx = Vx XOR Vy
+                        self.v[x] ^= self.v[y];
+                    }
+                    4 => {
+                        // 8xy4 - set Vx = Vx + Vy, set VF = carry
+                        let (result, overflow) = self.v[x].overflowing_add(self.v[y]);
+                        self.v[0xF] = if overflow { 1 } else { 0 };
+                        self.v[x] = result;
+                    }
+                    5 => {
+                        // 8xy5 - set Vx = Vx - Vy, set VF = NOT borrow (if Vx > Vy, then VF=1)
+                        self.v[0xF] = if self.v[x] > self.v[y] { 1 } else { 0 };
+                        self.v[x] = self.v[x].wrapping_sub(self.v[y]);
+                    }
+                    6 => {
+                        // 8xy6 - SHIFTR
+                        // Quirk: if shift_vy is true, Vx = Vy then shift. Else Vx = Vx then shift.
+                        if self.quirks.shift_vy {
+                            self.v[x] = self.v[y];
+                        }
+                        self.v[0xF] = self.v[x] & 1;
+                        self.v[x] >>= 1;
+                    }
+                    7 => {
+                        // 8xy7 - set Vx = Vy - Vx, set VF = NOT borrow
+                        self.v[0xF] = if self.v[y] > self.v[x] { 1 } else { 0 };
+                        self.v[x] = self.v[y].wrapping_sub(self.v[x]);
+                    }
+                    0xE => {
+                        // 8xyE - SHIFTL
+                        // Quirk: if shift_vy is true, Vx = Vy then shift. Else Vx = Vx then shift.
+                        if self.quirks.shift_vy {
+                            self.v[x] = self.v[y];
+                        }
+                        self.v[0xF] = (self.v[x] & 0x80) >> 7;
+                        self.v[x] <<= 1;
+                    }
+                    _ => println!("Unknown opcode: {:X}", opcode),
+                }
+            }
+            9 => {
+                // 9xy0 - skip next instruction if Vx != Vy
+                if self.v[x] != self.v[y] {
+                    self.pc += 2;
+                }
+            }
+            0xA => {
+                // Annn - set I = nnn
+                self.i = nnn;
+            }
+            0xB => {
+                // Bnnn - jump to location nnn + V0
+                self.pc = nnn + self.v[0] as u16;
+            }
+            0xC => {
+                // Cxkk - set Vx = random byte AND kk
+                let mut rng = rand::rng();
+                let random: u8 = rng.random();
+                self.v[x] = random & kk;
+            }
+            0xD => {
+                // Dxyn - display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision
+                let vx = self.v[x] as usize;
+                let vy = self.v[y] as usize;
+                let height = fourth_nibble as usize;
+                let mut collision: u8 = 0;
+
+                for yline in 0..height {
+                    let pixel = self.memory[self.i as usize + yline];
+                    for xline in 0..8 {
+                        if (pixel & (0x80 >> xline)) != 0 {
+                            let idx = (vx + xline + ((vy + yline) * 64)) as usize;
+                            // wrapping behavior is sometimes expected but let's stick to clipping or simple check
+                            // Standard Chip-8 usually wraps. But here let's stick to boundary check as before but simpler.
+                            let display_len = self.display.len();
+                            // Simple clipping to avoid panic
+                            let actual_idx = idx % display_len;
+
+                            if self.display[actual_idx] == 1 {
+                                collision = 1;
+                            }
+                            self.display[actual_idx] ^= 1;
                         }
                     }
-                    if !key_pressed {
-                        //println!("Waiting for key press...");
-                        chip8.pc -= 2;
-                    }
-                },
-                0x15 => {
-                    // Fx15 - set delay timer = Vx
-                    chip8.timer_delay = chip8.v[second_nibble as usize];
-                },
-                0x18 => {
-                    // Fx18 - set sound timer = Vx
-                    chip8.timer_sound = chip8.v[second_nibble as usize];
-                },
-                0x1E => {
-                    // Fx1E - set I = I + Vx
-                    chip8.i += chip8.v[second_nibble as usize] as u16;
-                },
-                0x29 => {
-                    // Fx29 - set I = location of sprite for digit Vx
-                    chip8.i = chip8.v[second_nibble as usize] as u16 * 0x5;
-                },
-                0x33 => {
-                    // Fx33 - store BCD representation of Vx in memory locations I, I+1, and I+2
-                    let num = chip8.v[second_nibble as usize];
-                    chip8.memory[chip8.i as usize] = num / 100;
-                    chip8.memory[(chip8.i + 1) as usize] = (num % 100) / 10;
-                    chip8.memory[(chip8.i + 2) as usize] = num % 10;
-                },
-                0x55 => {
-                    // Fx55 - store registers V0 through Vx in memory starting at location I
-                    for i in 0..second_nibble + 1 {
-                        chip8.memory[chip8.i as usize + i as usize] = chip8.v[i as usize];
-                    }
-                },
-                0x65 => {
-                    // Fx65 - read registers V0 through Vx from memory starting at location I
-                    for i in 0..second_nibble + 1 {
-                        chip8.v[i as usize] = chip8.memory[chip8.i as usize + i as usize];
-                    }
-                },
-                _ => println!("Unknown opcode: {:X}", opcode),
+                }
+
+                self.v[0xF] = collision;
             }
+            0xE => {
+                match kk {
+                    0x9E => {
+                        // Ex9E - skip next instruction if key with the value of Vx is pressed
+                        if keypad[self.v[x] as usize] != 0 {
+                            self.pc += 2;
+                        }
+                    }
+                    0xA1 => {
+                        // ExA1 - skip next instruction if key with the value of Vx is not pressed
+                        if keypad[self.v[x] as usize] == 0 {
+                            self.pc += 2;
+                        }
+                    }
+                    _ => println!("Unknown opcode: {:X}", opcode),
+                }
+            }
+            0xF => {
+                match kk {
+                    0x07 => {
+                        // Fx07 - set Vx = delay timer value
+                        self.v[x] = self.timer_delay;
+                    }
+                    0x0A => {
+                        // Fx0A - wait for a key press, store the value of the key in Vx
+                        let mut key_pressed = false;
+                        for i in 0..keypad.len() {
+                            if keypad[i] != 0 {
+                                self.v[x] = i as u8;
+                                key_pressed = true;
+                            }
+                        }
+                        if !key_pressed {
+                            self.pc -= 2; // Loop instruction
+                        }
+                    }
+                    0x15 => {
+                        // Fx15 - set delay timer = Vx
+                        self.timer_delay = self.v[x];
+                    }
+                    0x18 => {
+                        // Fx18 - set sound timer = Vx
+                        self.timer_sound = self.v[x];
+                    }
+                    0x1E => {
+                        // Fx1E - set I = I + Vx
+                        self.i += self.v[x] as u16;
+                    }
+                    0x29 => {
+                        // Fx29 - set I = location of sprite for digit Vx
+                        self.i = self.v[x] as u16 * 0x5;
+                    }
+                    0x33 => {
+                        // Fx33 - store BCD representation of Vx in memory locations I, I+1, and I+2
+                        let num = self.v[x];
+                        self.memory[self.i as usize] = num / 100;
+                        self.memory[(self.i + 1) as usize] = (num % 100) / 10;
+                        self.memory[(self.i + 2) as usize] = num % 10;
+                    }
+                    0x55 => {
+                        // Fx55 - store registers V0 through Vx in memory starting at location I
+                        for i in 0..=x {
+                            self.memory[self.i as usize + i] = self.v[i];
+                        }
+                    }
+                    0x65 => {
+                        // Fx65 - read registers V0 through Vx from memory starting at location I
+                        for i in 0..=x {
+                            self.v[i] = self.memory[self.i as usize + i];
+                        }
+                    }
+                    _ => println!("Unknown opcode: {:X}", opcode),
+                }
+            }
+            _ => println!("Unknown opcode: {:X}", opcode),
         }
-       _ => println!("Unknown opcode: {:X}", opcode),
     }
 }
 
-pub fn handle_keypads (chip8: & mut Chip8, rl_context: &RaylibHandle) {
-    match rl_context.is_key_down(KeyboardKey::KEY_ONE) {
-        true => chip8.keypad[0x1] = 1,
-        false => chip8.keypad[0x1] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_TWO) {
-        true => chip8.keypad[0x2] = 1,
-        false => chip8.keypad[0x2] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_THREE) {
-        true => chip8.keypad[0x3] = 1,
-        false => chip8.keypad[0x3] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_C) {
-        true => chip8.keypad[0xC] = 1,
-        false => chip8.keypad[0xC] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_FOUR) {
-        true => chip8.keypad[0x4] = 1,
-        false => chip8.keypad[0x4] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_FIVE) {
-        true => chip8.keypad[0x5] = 1,
-        false => chip8.keypad[0x5] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_SIX) {
-        true => chip8.keypad[0x6] = 1,
-        false => chip8.keypad[0x6] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_D) {
-        true => chip8.keypad[0xD] = 1,
-        false => chip8.keypad[0xD] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_SEVEN) {
-        true => chip8.keypad[0x7] = 1,
-        false => chip8.keypad[0x7] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_EIGHT) {
-        true => chip8.keypad[0x8] = 1,
-        false => chip8.keypad[0x8] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_NINE) {
-        true => chip8.keypad[0x9] = 1,
-        false => chip8.keypad[0x9] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_E) {
-        true => chip8.keypad[0xE] = 1,
-        false => chip8.keypad[0xE] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_A) {
-        true => chip8.keypad[0xA] = 1,
-        false => chip8.keypad[0xA] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_ZERO) {
-        true => chip8.keypad[0x0] = 1,
-        false => chip8.keypad[0x0] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_B) {
-        true => chip8.keypad[0xB] = 1,
-        false => chip8.keypad[0xB] = 0,
-    }
-    match rl_context.is_key_down(KeyboardKey::KEY_F) {
-        true => chip8.keypad[0xF] = 1,
-        false => chip8.keypad[0xF] = 0,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initial_state() {
+        let chip8 = Chip8::new(Quirks::default());
+        assert_eq!(chip8.get_pc(), 0x200);
+        assert_eq!(chip8.get_sp(), 0);
     }
 
-}
+    #[test]
+    fn test_jump_1nnn() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        chip8.execute_opcode(0x1300, [0; 16]); // Jump to 0x300
+        assert_eq!(chip8.get_pc(), 0x300);
+    }
 
-pub fn play_beep ( chip8: & mut Chip8) {
-    if chip8.timer_sound > 0 {
-        println!("BEEP");
+    #[test]
+    fn test_call_and_return() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        let start_pc = 0x200;
+
+        // 2300 - Call 0x300
+        chip8.execute_opcode(0x2300, [0; 16]);
+
+        assert_eq!(chip8.get_pc(), 0x300);
+        assert_eq!(chip8.get_sp(), 1);
+        assert_eq!(chip8.get_stack()[0], start_pc);
+
+        // 00EE - Return
+        chip8.execute_opcode(0x00EE, [0; 16]);
+
+        assert_eq!(chip8.get_pc(), start_pc);
+        assert_eq!(chip8.get_sp(), 0);
+    }
+
+    #[test]
+    fn test_nested_calls() {
+        let mut chip8 = Chip8::new(Quirks::default());
+
+        // Call 0x300
+        chip8.execute_opcode(0x2300, [0; 16]);
+        assert_eq!(chip8.get_pc(), 0x300);
+        assert_eq!(chip8.get_sp(), 1);
+        assert_eq!(chip8.get_stack()[0], 0x200);
+
+        // Call 0x400 from 0x300
+        chip8.execute_opcode(0x2400, [0; 16]);
+        assert_eq!(chip8.get_pc(), 0x400);
+        assert_eq!(chip8.get_sp(), 2);
+        assert_eq!(chip8.get_stack()[1], 0x300);
+
+        // Return to 0x300
+        chip8.execute_opcode(0x00EE, [0; 16]);
+        assert_eq!(chip8.get_pc(), 0x300);
+        assert_eq!(chip8.get_sp(), 1);
+
+        // Return to 0x200
+        chip8.execute_opcode(0x00EE, [0; 16]);
+        assert_eq!(chip8.get_pc(), 0x200);
+        assert_eq!(chip8.get_sp(), 0);
+    }
+
+    #[test]
+    fn test_skip_3xkk_equal() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        chip8.set_v(0, 0x55);
+
+        // 3055 - Skip next if V0 == 0x55
+        // Case: Equal
+        chip8.execute_opcode(0x3055, [0; 16]);
+        assert_eq!(chip8.get_pc(), 0x200 + 2); // It skips (adds 2)
+    }
+
+    #[test]
+    fn test_skip_3xkk_not_equal() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        chip8.set_v(0, 0x55);
+
+        // 30AA - Skip next if V0 == 0xAA (False)
+        chip8.execute_opcode(0x30AA, [0; 16]);
+        assert_eq!(chip8.get_pc(), 0x200); // No skip
+    }
+
+    #[test]
+    fn test_add_7xkk() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        chip8.set_v(0, 0x10);
+
+        // 7005 - V0 += 0x05
+        chip8.execute_opcode(0x7005, [0; 16]);
+        assert_eq!(chip8.get_v_at(0), 0x15);
+
+        // Overflow test
+        chip8.set_v(0, 0xFF);
+        // 7001 - V0 += 1
+        chip8.execute_opcode(0x7001, [0; 16]);
+        assert_eq!(chip8.get_v_at(0), 0x00);
+    }
+
+    #[test]
+    fn test_add_register_8xy4() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        chip8.set_v(0, 0x10);
+        chip8.set_v(1, 0x20);
+
+        // 8014 - V0 = V0 + V1
+        chip8.execute_opcode(0x8014, [0; 16]);
+        assert_eq!(chip8.get_v_at(0), 0x30);
+        assert_eq!(chip8.get_v_at(0xF), 0); // No carry
+
+        // Carry test
+        chip8.set_v(0, 0xFF);
+        chip8.set_v(1, 0x01);
+        chip8.execute_opcode(0x8014, [0; 16]); // V0 += V1
+        assert_eq!(chip8.get_v_at(0), 0x00);
+        assert_eq!(chip8.get_v_at(0xF), 1); // Carry
+    }
+
+    #[test]
+    fn test_timers() {
+        let mut chip8 = Chip8::new(Quirks::default());
+        chip8.timer_delay = 2;
+        chip8.timer_sound = 2;
+
+        chip8.update_timers();
+        assert_eq!(chip8.timer_delay, 1);
+        assert_eq!(chip8.timer_sound, 1);
+
+        chip8.update_timers();
+        assert_eq!(chip8.timer_delay, 0);
+        assert_eq!(chip8.timer_sound, 0);
+
+        chip8.update_timers();
+        assert_eq!(chip8.timer_delay, 0); // Stops at 0
     }
 }
